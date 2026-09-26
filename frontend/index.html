@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kolkata Bus Tracker</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<style>
+  :root{
+    --ink:#0e1420;
+    --panel:#141b29;
+    --panel-edge:#232d3f;
+    --amber:#f4b53d;
+    --amber-dim:#8a6a2c;
+    --text:#e9ecf1;
+    --text-dim:#8993a6;
+    --good:#5bd18a;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0;
+    background:var(--ink);
+    color:var(--text);
+    font-family:'Courier New', ui-monospace, monospace;
+  }
+  header{
+    padding:22px 28px 16px;
+    border-bottom:1px solid var(--panel-edge);
+    display:flex; align-items:baseline; justify-content:space-between; flex-wrap:wrap; gap:10px;
+  }
+  header h1{
+    margin:0; font-size:22px; letter-spacing:1px; font-weight:700;
+    font-family: Georgia, 'Times New Roman', serif;
+  }
+  header .clock{ color:var(--amber); font-size:20px; letter-spacing:2px; }
+  header .sub{ color:var(--text-dim); font-size:12px; margin-top:4px; font-family:Georgia,serif; }
+  main{ display:grid; grid-template-columns: 1.1fr 1fr; gap:18px; padding:18px 28px 28px; }
+  @media (max-width:880px){ main{ grid-template-columns:1fr; } }
+
+  #map{ height:520px; border:1px solid var(--panel-edge); border-radius:2px; }
+
+  .board{
+    background:var(--panel);
+    border:1px solid var(--panel-edge);
+    border-radius:2px;
+    overflow:hidden;
+  }
+  .board-head{
+    display:grid;
+    grid-template-columns: 70px 1fr 110px 90px;
+    padding:10px 14px;
+    font-size:11px;
+    color:var(--text-dim);
+    border-bottom:1px solid var(--panel-edge);
+  }
+  .rows{ max-height:520px; overflow-y:auto; }
+  .row{
+    display:grid;
+    grid-template-columns: 70px 1fr 110px 90px;
+    padding:12px 14px;
+    border-bottom:1px solid #1c2536;
+    align-items:center;
+  }
+  .row:hover{ background:#182034; }
+  .route-id{
+    color:var(--amber);
+    font-weight:700;
+    font-size:16px;
+    letter-spacing:1px;
+  }
+  .dest{ font-size:13px; }
+  .dest .area{ display:block; color:var(--text-dim); font-size:11px; margin-top:2px; }
+  .eta{ text-align:right; font-size:16px; }
+  .eta.soon{ color:var(--good); }
+  .dir{ text-align:right; font-size:11px; color:var(--text-dim); }
+
+  select{
+    background:var(--panel); color:var(--text); border:1px solid var(--panel-edge);
+    padding:8px 10px; font-family:inherit; font-size:13px; border-radius:2px;
+  }
+  .toolbar{ display:flex; gap:10px; align-items:center; padding:0 28px 4px; color:var(--text-dim); font-size:12px; }
+  footer{ padding:14px 28px 30px; color:var(--text-dim); font-size:11px; border-top:1px solid var(--panel-edge); }
+  a{ color:var(--amber); }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>KOLKATA BUS TRACKER</h1>
+    <div class="sub">Kolkata &middot; Salt Lake &middot; New Town &middot; Dum Dum &middot; Barasat</div>
+  </div>
+  <div class="clock" id="clock">--:--:--</div>
+</header>
+
+<div class="toolbar">
+  <label for="regionFilter">Region</label>
+  <select id="regionFilter"><option value="">All regions</option></select>
+  <span id="statusMsg"></span>
+</div>
+
+<main>
+  <div id="map"></div>
+
+  <div class="board">
+    <div class="board-head">
+      <span>ROUTE</span><span>TOWARDS</span><span style="text-align:right">NEXT STOP</span><span style="text-align:right">DIR</span>
+    </div>
+    <div class="rows" id="rows"></div>
+  </div>
+</main>
+
+<footer>
+  Positions are estimated from a sample published schedule, not live GPS &mdash;
+  see README.md in the project for how to connect a real feed.
+  API: <span id="apiBase"></span>
+</footer>
+
+<script>
+const API_BASE = "http://localhost:8000";
+document.getElementById('apiBase').textContent = API_BASE;
+
+const map = L.map('map', { zoomControl: true }).setView([22.62, 88.42], 11);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '&copy; OpenStreetMap contributors',
+  maxZoom: 18
+}).addTo(map);
+
+const markers = {};
+function busIcon(routeId){
+  return L.divIcon({
+    className: '',
+    html: `<div style="background:#f4b53d;color:#0e1420;font:700 11px monospace;
+                padding:2px 6px;border-radius:3px;border:1px solid #0e1420;white-space:nowrap;">
+                ${routeId}</div>`,
+    iconSize: [0,0]
+  });
+}
+
+function fmtEta(min){
+  if (min === null || min === undefined) return '--';
+  if (min < 1) return 'arriving';
+  return Math.round(min) + ' min';
+}
+
+let allRegions = new Set();
+
+async function refresh(){
+  document.getElementById('clock').textContent = new Date().toLocaleTimeString('en-IN', {hour12:false});
+  try {
+    const res = await fetch(`${API_BASE}/api/live`);
+    if (!res.ok) throw new Error('bad response');
+    const data = await res.json();
+    document.getElementById('statusMsg').textContent =
+      `${data.buses.length} buses in service \u00b7 server time ${data.server_time}`;
+    render(data.buses);
+  } catch (e) {
+    document.getElementById('statusMsg').textContent =
+      'Could not reach API at ' + API_BASE + ' (is the backend running?)';
+  }
+}
+
+function render(buses){
+  const filter = document.getElementById('regionFilter').value;
+  const rows = document.getElementById('rows');
+  rows.innerHTML = '';
+
+  const regionSelect = document.getElementById('regionFilter');
+  buses.forEach(b => allRegions.add(b.region));
+  if (regionSelect.options.length <= 1) {
+    [...allRegions].sort().forEach(r => {
+      const opt = document.createElement('option');
+      opt.value = r; opt.textContent = r;
+      regionSelect.appendChild(opt);
+    });
+  }
+
+  const seen = new Set();
+  buses
+    .filter(b => !filter || b.region === filter)
+    .sort((a,b) => (a.next_stop_eta_min ?? 999) - (b.next_stop_eta_min ?? 999))
+    .forEach(b => {
+      const row = document.createElement('div');
+      row.className = 'row';
+      row.innerHTML = `
+        <span class="route-id">${b.route_id}</span>
+        <span class="dest">${b.route_name}<span class="area">${b.region}</span></span>
+        <span class="eta ${b.next_stop_eta_min < 3 ? 'soon' : ''}">${b.next_stop || '--'}<br><small>${fmtEta(b.next_stop_eta_min)}</small></span>
+        <span class="dir">${b.direction}</span>
+      `;
+      rows.appendChild(row);
+
+      seen.add(b.trip_id);
+      const key = 'trip_' + b.trip_id;
+      if (markers[key]) {
+        markers[key].setLatLng([b.lat, b.lon]);
+      } else {
+        markers[key] = L.marker([b.lat, b.lon], { icon: busIcon(b.route_id) })
+          .addTo(map)
+          .bindPopup(`<b>${b.route_id}</b> ${b.route_name}<br>Next: ${b.next_stop} (${fmtEta(b.next_stop_eta_min)})`);
+      }
+    });
+
+  // remove markers for trips no longer active
+  Object.keys(markers).forEach(key => {
+    const tripId = parseInt(key.replace('trip_',''));
+    if (!seen.has(tripId)) { map.removeLayer(markers[key]); delete markers[key]; }
+  });
+}
+
+document.getElementById('regionFilter').addEventListener('change', refresh);
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+
+</body>
+</html>
